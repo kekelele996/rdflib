@@ -96,6 +96,7 @@ __all__ = [
     "util",
     "plugin",
     "query",
+    "bulk",
     "NORMALIZE_LITERALS",
 ]
 
@@ -202,5 +203,5 @@ from rdflib.namespace import (
 )
 from rdflib.term import BNode, IdentifiedNode, Literal, Node, URIRef, Variable
 
-from rdflib import plugin, query, util  # isort:skip
+from rdflib import bulk, plugin, query, util  # isort:skip
 from rdflib.container import *  # isort:skip # noqa: F403
