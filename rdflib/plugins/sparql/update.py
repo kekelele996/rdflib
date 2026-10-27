@@ -5,7 +5,7 @@ Code for carrying out Update Operations
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from rdflib.graph import Graph
 from rdflib.plugins.sparql.evaluate import evalBGP, evalPart
@@ -13,6 +13,27 @@ from rdflib.plugins.sparql.evalutils import _fillTemplate, _join
 from rdflib.plugins.sparql.parserutils import CompValue
 from rdflib.plugins.sparql.sparql import FrozenDict, QueryContext, Update
 from rdflib.term import Identifier, URIRef, Variable
+
+
+class UpdateObserver(Protocol):
+    """Observer notified around each operation of an update request.
+
+    Implementations may inspect the shadow graph via ``ctx`` in ``before``
+    and ``after``. ``after`` is always called, including when an operation
+    failed (``succeeded=False``); a non-SILENT failure is re-raised after
+    the notification.
+    """
+
+    def before(self, index: int, operation: CompValue, ctx: QueryContext) -> None: ...
+
+    def after(
+        self,
+        index: int,
+        operation: CompValue,
+        ctx: QueryContext,
+        *,
+        succeeded: bool,
+    ) -> None: ...
 
 
 def _graphOrDefault(ctx: QueryContext, g: str) -> Graph | None:
@@ -286,6 +307,7 @@ def evalUpdate(
     graph: Graph,
     update: Update,
     initBindings: Mapping[str, Identifier] | None = None,
+    observer: UpdateObserver | None = None,
 ) -> None:
     """http://www.w3.org/TR/sparql11-update/#updateLanguage
 
@@ -317,13 +339,16 @@ def evalUpdate(
 
     """
 
-    for u in update.algebra:
+    for i, u in enumerate(update.algebra):
         initBindings = dict((Variable(k), v) for k, v in (initBindings or {}).items())
 
         ctx = QueryContext(graph, initBindings=initBindings)
         ctx.prologue = u.prologue
 
+        succeeded = False
         try:
+            if observer is not None:
+                observer.before(i, u, ctx)
             if u.name == "Load":
                 evalLoad(ctx, u)
             elif u.name == "Clear":
@@ -348,6 +373,10 @@ def evalUpdate(
                 evalModify(ctx, u)
             else:
                 raise Exception("Unknown update operation: %s" % (u,))
+            succeeded = True
         except:  # noqa: E722
             if not u.silent:
                 raise
+        finally:
+            if observer is not None:
+                observer.after(i, u, ctx, succeeded=succeeded)

@@ -33,6 +33,15 @@ PLUGIN_ENTRY_POINT = "rdf.plugins.sparqleval"
 
 
 from . import operators, parser, parserutils
+from .preview import (
+    StaleUpdatePlanError,
+    UpdateApplicationError,
+    UpdateConflict,
+    UpdatePlan,
+    UpdatePreview,
+    UpdatePreviewError,
+    preview_update,
+)
 from .processor import prepareQuery, prepareUpdate, processUpdate
 
 assert parser
@@ -55,6 +64,13 @@ __all__ = [
     "prepareQuery",
     "prepareUpdate",
     "processUpdate",
+    "preview_update",
+    "UpdatePlan",
+    "UpdatePreview",
+    "UpdatePreviewError",
+    "StaleUpdatePlanError",
+    "UpdateApplicationError",
+    "UpdateConflict",
     "operators",
     "parser",
     "parserutils",
