@@ -67,6 +67,12 @@ __all__ = [
     "Dataset",
     "Graph",
     "ConjunctiveGraph",
+    "Snapshot",
+    "SnapshotCursor",
+    "Page",
+    "SnapshotError",
+    "SnapshotClosedError",
+    "StaleSnapshotError",
     "BRICK",
     "CSVW",
     "DC",
@@ -199,6 +205,14 @@ from rdflib.namespace import (
     XMLNS,
     XSD,
     Namespace,
+)
+from rdflib.snapshot import (
+    Page,
+    Snapshot,
+    SnapshotClosedError,
+    SnapshotCursor,
+    SnapshotError,
+    StaleSnapshotError,
 )
 from rdflib.term import BNode, IdentifiedNode, Literal, Node, URIRef, Variable
 

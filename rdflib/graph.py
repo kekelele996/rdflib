@@ -319,6 +319,7 @@ if TYPE_CHECKING:
 
     import rdflib.query
     from rdflib.plugins.sparql.sparql import Query, Update
+    from rdflib.snapshot import Snapshot
 
 _SubjectType = Node
 _PredicateType = Node
@@ -537,10 +538,39 @@ class Graph(Node):
         self.context_aware = False
         self.formula_aware = False
         self.default_union = False
+        #: Monotonic counter bumped on every mutating call, used by snapshots
+        #: to detect writes that happened after a read view was opened.
+        self._revision: int = 0
 
     @property
     def store(self) -> Store:
         return self.__store
+
+    @property
+    def revision(self) -> int:
+        """Revision of the graph content.
+
+        The revision starts at ``0`` and is incremented each time statements
+        are added to or removed from the graph through this object, including
+        parsing and SPARQL update requests. Two equal revision values
+        therefore indicate that no write request was made to this object in
+        between.
+
+        Writes made through a different graph handle that shares the same
+        store (for example a named graph obtained from a
+        [`Dataset`][rdflib.graph.Dataset] with [`Dataset.graph()`][rdflib.graph.Dataset.graph])
+        are counted on that handle, not on this one; quads added through the
+        dataset itself ([`Dataset.add()`][rdflib.graph.Dataset.add] /
+        [`Dataset.addN()`][rdflib.graph.Dataset.addN]) are counted here.
+
+        A [`Snapshot`][rdflib.snapshot.Snapshot] records the revision at the
+        moment it was opened and uses it to tell whether the graph was
+        written to while the snapshot was being paged through.
+        """
+        return self._revision
+
+    def _bump_revision(self) -> None:
+        self._revision += 1
 
     @property
     def identifier(self) -> _ContextIdentifierType:
@@ -623,6 +653,7 @@ class Graph(Node):
         assert isinstance(p, Node), "Predicate %s must be an rdflib term" % (p,)
         assert isinstance(o, Node), "Object %s must be an rdflib term" % (o,)
         self.__store.add((s, p, o), self, quoted=False)
+        self._bump_revision()
         return self
 
     def addN(self: _GraphT, quads: Iterable[_QuadType]) -> _GraphT:  # noqa: N802
@@ -635,6 +666,7 @@ class Graph(Node):
             and c.identifier is self.identifier
             and _assertnode(s, p, o)
         )
+        self._bump_revision()
         return self
 
     def remove(self: _GraphT, triple: _TriplePatternType) -> _GraphT:
@@ -644,6 +676,7 @@ class Graph(Node):
         from all contexts.
         """
         self.__store.remove(triple, context=self)
+        self._bump_revision()
         return self
 
     @overload
@@ -1792,6 +1825,43 @@ class Graph(Node):
 
         return processor.update(update_object, initBindings, initNs, **kwargs)
 
+    def snapshot(self, triple: _TriplePatternType = (None, None, None)) -> Snapshot:
+        """Open a fixed, immutable read view (snapshot) of this graph.
+
+        The statements matching ``triple`` are materialized once when the
+        snapshot is opened, and paging, cursors and SPARQL queries on the
+        snapshot always operate on that fixed materialized view. Statements
+        written to this graph afterwards can therefore not be duplicated,
+        skipped or mixed into pages of the snapshot.
+
+        The snapshot records the graph's
+        [`revision`][rdflib.graph.Graph.revision]. If the graph is modified
+        while the snapshot is being paged through, the next cursor or query
+        request raises
+        [`StaleSnapshotError`][rdflib.snapshot.StaleSnapshotError] instead of
+        silently shifting pages. Call
+        [`Snapshot.overwrite()`][rdflib.snapshot.Snapshot.overwrite] to
+        replace the fixed view with the current content, or
+        [`Snapshot.close()`][rdflib.snapshot.Snapshot.close] and open a new
+        snapshot to start over.
+
+        When called on a [`Dataset`][rdflib.graph.Dataset] or
+        [`ConjunctiveGraph`][rdflib.graph.ConjunctiveGraph], the fixed view
+        contains the union of all constituent graphs; queries on the
+        snapshot are evaluated against this union.
+
+        Args:
+            triple: An optional triple pattern `(s, p, o)` restricting the
+                snapshot; each component may be a specific term or `None`.
+                Property paths are not supported here.
+
+        Returns:
+            A new [`Snapshot`][rdflib.snapshot.Snapshot].
+        """
+        from rdflib.snapshot import Snapshot
+
+        return Snapshot(self, triple_pattern=triple)
+
     def n3(self, namespace_manager: NamespaceManager | None = None) -> str:
         """Return an n3 identifier for the Graph"""
         return "[%s]" % self.identifier.n3(namespace_manager=namespace_manager)
@@ -2249,6 +2319,7 @@ class ConjunctiveGraph(Graph):
 
         # type error: Argument "context" to "add" of "Store" has incompatible type "Optional[Graph]"; expected "Graph"
         self.store.add((s, p, o), context=c, quoted=False)  # type: ignore[arg-type]
+        self._bump_revision()
         return self
 
     @overload
@@ -2279,6 +2350,7 @@ class ConjunctiveGraph(Graph):
         self.store.addN(
             (s, p, o, self._graph(c)) for s, p, o, c in quads if _assertnode(s, p, o)
         )
+        self._bump_revision()
         return self
 
     # type error: Argument 1 of "remove" is incompatible with supertype "Graph"; supertype defines the argument type as "tuple[Optional[Node], Optional[Node], Optional[Node]]"
@@ -2293,6 +2365,7 @@ class ConjunctiveGraph(Graph):
         s, p, o, c = self._spoc(triple_or_quad)
 
         self.store.remove((s, p, o), context=c)
+        self._bump_revision()
         return self
 
     @overload
@@ -2736,6 +2809,7 @@ class Dataset(ConjunctiveGraph):
         # type error: Property "store" defined in "Graph" is read-only
         # type error: Property "identifier" defined in "Graph" is read-only
         self.store, self.identifier, self.default_graph, self.default_union = state  # type: ignore[misc]
+        self._revision = 0
 
     def __iadd__(self: _DatasetT, other: Iterable[_QuadType]) -> _DatasetT:  # type: ignore[override, misc]
         """Add all quads in Dataset other to Dataset.
@@ -2986,6 +3060,7 @@ class QuotedGraph(Graph):
         assert isinstance(o, Node), "Object %s must be an rdflib term" % (o,)
 
         self.store.add((s, p, o), self, quoted=True)
+        self._bump_revision()
         return self
 
     def addN(self: _GraphT, quads: Iterable[_QuadType]) -> _GraphT:  # noqa: N802
@@ -2998,6 +3073,7 @@ class QuotedGraph(Graph):
             and c.identifier is self.identifier
             and _assertnode(s, p, o)
         )
+        self._bump_revision()
         return self
 
     def n3(self, namespace_manager: NamespaceManager | None = None) -> str:
