@@ -7,6 +7,7 @@ from __future__ import annotations
 __all__ = [
     "Error",
     "ParserError",
+    "SerializationVerificationError",
     "UniquenessError",
 ]
 
@@ -43,3 +44,22 @@ class UniquenessError(Error):
 Uniqueness assumption is not fulfilled. Multiple values are: %s"
             % values,
         )
+
+
+class SerializationVerificationError(Error):
+    """Serializing a graph to a file could not be completed safely.
+
+    This is raised by [`rdflib.tools.safe_serialize`][rdflib.tools.safe_serialize]
+    when writing, reading back or verifying the side file fails, or when the
+    read-back graph does not contain the same statements (and named graphs)
+    as the source graph. The destination file is never replaced in this case,
+    so a previously published file is left untouched.
+
+    Attributes:
+        stage: Which step failed. One of ``"write"``, ``"readback"``,
+            ``"verify"`` or ``"publish"``.
+    """
+
+    def __init__(self, msg: str, stage: str | None = None):
+        Error.__init__(self, msg)
+        self.stage = stage
