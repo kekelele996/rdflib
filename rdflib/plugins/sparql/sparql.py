@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import datetime
 import itertools
+import threading
 import typing as t
 from collections.abc import Container, Generator, Iterable, Mapping, MutableMapping
 from typing import (
@@ -16,6 +17,7 @@ import rdflib.plugins.sparql
 from rdflib.graph import ConjunctiveGraph, Dataset, Graph
 from rdflib.namespace import NamespaceManager
 from rdflib.plugins.sparql.parserutils import CompValue
+from rdflib.query import QueryCancelledError
 from rdflib.term import BNode, Identifier, Literal, Node, URIRef, Variable
 
 if TYPE_CHECKING:
@@ -247,11 +249,15 @@ class QueryContext:
         bindings: Bindings | FrozenBindings | list[Any] | None = None,
         initBindings: Mapping[str, Identifier] | None = None,
         datasetClause=None,
+        event: threading.Event | None = None,
     ):
         self.initBindings = initBindings
         self.bindings = Bindings(d=bindings or [])
         if initBindings:
             self.bindings.update(initBindings)
+
+        # A cancellation request, shared with every cloned/pushed context.
+        self.event: threading.Event | None = event
 
         self.graph: Graph | None
         self._dataset: Dataset | ConjunctiveGraph | None
@@ -303,11 +309,21 @@ class QueryContext:
             self._dataset if self._dataset is not None else self.graph,
             bindings or self.bindings,
             initBindings=self.initBindings,
+            event=self.event,
         )
         r.prologue = self.prologue
         r.graph = self.graph
         r.bnodes = self.bnodes
         return r
+
+    def check_cancelled(self) -> None:
+        """Raise `QueryCancelledError` if a cancellation was requested.
+
+        Called at result boundaries while evaluating a query, so a
+        cancelled query stops before producing or reading the next result.
+        """
+        if self.event is not None and self.event.is_set():
+            raise QueryCancelledError()
 
     @property
     def dataset(self) -> ConjunctiveGraph:

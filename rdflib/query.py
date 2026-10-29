@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import enum
 import itertools
+import threading
 import types
 import warnings
 from collections.abc import Iterator, Mapping, MutableSequence
@@ -26,6 +28,8 @@ __all__ = [
     "ResultParser",
     "ResultSerializer",
     "ResultException",
+    "QueryCancelledError",
+    "ResultStatus",
     "EncodeOnlyUnicode",
 ]
 
@@ -56,6 +60,7 @@ class Processor:
         initBindings: Mapping[str, Identifier] = {},  # noqa: N803
         initNs: Mapping[str, Any] = {},  # noqa: N803
         DEBUG: bool = False,  # noqa: N803
+        event: threading.Event | None = None,
     ) -> Mapping[str, Any]:
         pass
 
@@ -85,6 +90,37 @@ class UpdateProcessor:
 
 class ResultException(Exception):  # noqa: N818
     pass
+
+
+class QueryCancelledError(BaseException):
+    """Raised inside query evaluation when a running query is cancelled.
+
+    Inherits from `BaseException`, like `KeyboardInterrupt` and
+    `asyncio.CancelledError`, so that ``except Exception`` blocks in query
+    evaluation (e.g. ``SERVICE SILENT``) do not swallow a cancellation request
+    and the query stops at the next result boundary.
+    """
+
+    def __init__(self, message: str = "query was cancelled") -> None:
+        super().__init__(message)
+
+
+class ResultStatus(enum.Enum):
+    """Terminal status of a query result.
+
+    Attributes:
+        RUNNING: Evaluation has not finished (or started) yet.
+        COMPLETED: The query ran to the end and all results are available.
+        CANCELLED: Evaluation was stopped by a cancellation request; rows
+            produced before stopping are retained.
+        ERROR: Evaluation failed with an exception; rows produced before the
+            failure are retained and the exception is in `Result.error`.
+    """
+
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+    ERROR = "ERROR"
 
 
 class EncodeOnlyUnicode:
@@ -217,6 +253,46 @@ class Result:
         self._genbindings: Optional[Iterator[Mapping[Variable, Identifier]]] = None
         self.askAnswer: bool | None = None
         self.graph: Graph | None = None
+        #: Whether the query completed, was cancelled or failed. Results
+        #: parsed from a serialized result are always `ResultStatus.COMPLETED`.
+        self.status: ResultStatus = ResultStatus.COMPLETED
+        #: The exception that ended evaluation, for `ResultStatus.ERROR`, or
+        #: the `QueryCancelledError` for `ResultStatus.CANCELLED`.
+        self.error: BaseException | None = None
+
+    def _track_bindings(
+        self,
+        gen: Iterator[Mapping[Variable, Identifier]],
+    ) -> Iterator[Mapping[Variable, Identifier]]:
+        """Drive a live bindings generator and record how it ended.
+
+        A cancellation ends iteration without raising, so rows already
+        produced are retained; any other exception is recorded in
+        `self.error` before being re-raised. The upstream generator is always
+        closed when iteration ends so it releases any store iterator, cursor
+        or connection it holds.
+        """
+        try:
+            for binding in gen:
+                yield binding
+        except QueryCancelledError as err:
+            self.status = ResultStatus.CANCELLED
+            self.error = err
+            self._genbindings = None
+            return
+        except Exception as err:
+            self.status = ResultStatus.ERROR
+            self.error = err
+            self._genbindings = None
+            raise
+        else:
+            self.status = ResultStatus.COMPLETED
+        finally:
+            # Unwind the whole evaluation pipeline, closing any store
+            # iterator (e.g. a cursor or HTTP response) it holds.
+            close = getattr(gen, "close", None)
+            if close is not None:
+                close()
 
     @property
     def bindings(self) -> MutableSequence[Mapping[Variable, Identifier]]:
@@ -238,7 +314,9 @@ class Result:
         ],
     ) -> None:
         if isinstance(b, (types.GeneratorType, itertools.islice)):
-            self._genbindings = b
+            self.status = ResultStatus.RUNNING
+            self.error = None
+            self._genbindings = self._track_bindings(b)
             self._bindings = []
         else:
             # type error: Incompatible types in assignment (expression has type "Union[MutableSequence[Mapping[Variable, Identifier]], Iterator[Mapping[Variable, Identifier]]]", variable has type "MutableSequence[Mapping[Variable, Identifier]]")

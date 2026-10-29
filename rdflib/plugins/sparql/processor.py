@@ -6,6 +6,7 @@ These should be automatically registered with RDFLib
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from typing import Any, Union
 
@@ -121,11 +122,19 @@ class SPARQLProcessor(Processor):
         initNs: Mapping[str, Any] | None = None,
         base: str | None = None,
         DEBUG: bool = False,
+        event: threading.Event | None = None,
     ) -> Mapping[str, Any]:
         """
         Evaluate a query with the given initial bindings, and initial
         namespaces. The given base is used to resolve relative URIs in
         the query and will be overridden by any BASE given in the query.
+
+        Set `event` from another thread to cancel a long-running query; it
+        stops before producing the next result and closes its store
+        iterator. A streamed SELECT result reports
+        ``rdflib.query.ResultStatus.CANCELLED``. Query forms that evaluate
+        eagerly before a result exists (ASK, CONSTRUCT, DESCRIBE and SELECT
+        with ORDER BY) raise `rdflib.query.QueryCancelledError` instead.
 
         !!! warning "Caution"
 
@@ -144,4 +153,4 @@ class SPARQLProcessor(Processor):
         if isinstance(strOrQuery, str):
             strOrQuery = translateQuery(parseQuery(strOrQuery), base, initNs)
 
-        return evalQuery(self.graph, strOrQuery, initBindings, base)
+        return evalQuery(self.graph, strOrQuery, initBindings, base, event=event)

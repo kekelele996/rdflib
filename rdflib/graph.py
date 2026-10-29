@@ -271,6 +271,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import random
+import threading
 import warnings
 from collections.abc import Callable, Generator, Iterable, Mapping
 from io import BytesIO
@@ -1673,6 +1674,7 @@ class Graph(Node):
         initNs: Mapping[str, Any] | None = None,  # noqa: N803
         initBindings: Mapping[str, Identifier] | None = None,  # noqa: N803
         use_store_provided: bool = True,
+        event: threading.Event | None = None,
         **kwargs: Any,
     ) -> query.Result:
         """
@@ -1687,6 +1689,12 @@ class Graph(Node):
             initBindings: Initial variable bindings to use. A type of 'prepared queries'
                 can be realized by providing these bindings.
             use_store_provided: Whether to use the store's query method if available.
+            event: A ``threading.Event`` another thread may set to cancel a
+                long-running query. Evaluation stops before the next result is
+                produced and releases its store iterator; the returned SELECT
+                result keeps the rows produced so far and its ``status`` is
+                `~rdflib.query.ResultStatus.CANCELLED`. Only applies to
+                rdflib's own SPARQL processor, not to a store-provided query.
             kwargs: Additional arguments to pass to the query processor.
 
         Returns:
@@ -1732,7 +1740,11 @@ class Graph(Node):
             processor = plugin.get(processor, query.Processor)(self)
 
         # type error: Argument 1 to "Result" has incompatible type "Mapping[str, Any]"; expected "str"
-        return result(processor.query(query_object, initBindings, initNs, **kwargs))  # type: ignore[arg-type]
+        return result(
+            processor.query(  # type: ignore[arg-type]
+                query_object, initBindings, initNs, event=event, **kwargs
+            )
+        )
 
     def update(
         self,

@@ -19,6 +19,7 @@ import collections
 import itertools
 import logging
 import re
+import threading
 from collections.abc import Generator, Iterable, Mapping
 from typing import (
     TYPE_CHECKING,
@@ -53,6 +54,7 @@ from rdflib.plugins.sparql.sparql import (
     QueryContext,
     SPARQLError,
 )
+from rdflib.query import QueryCancelledError
 from rdflib.term import BNode, Identifier, Literal, URIRef, Variable
 
 if TYPE_CHECKING:
@@ -84,6 +86,13 @@ def evalBGP(
         yield ctx.solution()
         return
 
+    # This is where the store is read. The event is checked *before* every
+    # read instead of in a regular for-loop body, so a cancelled query pulls
+    # no further rows from the store and releases the store iterator at once.
+    event = ctx.event
+    if event is not None and event.is_set():
+        raise QueryCancelledError()
+
     s, p, o = bgp[0]
 
     _s = ctx[s]
@@ -92,7 +101,16 @@ def evalBGP(
 
     # type error: Item "None" of "Optional[Graph]" has no attribute "triples"
     # type Argument 1 to "triples" of "Graph" has incompatible type "tuple[Union[str, Path, None], Union[str, Path, None], Union[str, Path, None]]"; expected "tuple[Optional[Node], Optional[Node], Optional[Node]]"
-    for ss, sp, so in ctx.graph.triples((_s, _p, _o)):  # type: ignore[union-attr, arg-type]
+    triples = iter(ctx.graph.triples((_s, _p, _o)))  # type: ignore[union-attr, arg-type]
+    while True:
+        if event is not None and event.is_set():
+            triples.close()
+            raise QueryCancelledError()
+        try:
+            ss, sp, so = next(triples)
+        except StopIteration:
+            return
+
         if None in (_s, _p, _o):
             c = ctx.push()
         else:
@@ -366,6 +384,8 @@ def evalServiceQuery(ctx: QueryContext, part: CompValue):
         raise ValueError(
             f"SERVICE {part.term.n3()} is not supported, the endpoint must be an IRI"
         )
+    # Do not contact a remote endpoint once the query was cancelled.
+    ctx.check_cancelled()
     service_url = str(part.term)
     service_query = _buildQueryStringForServiceCall(ctx, _serviceGraphPatternText(part))
 
@@ -427,6 +447,8 @@ def _callService(
             data=urlencode(query_settings).encode(),
             headers=headers,
         )
+    # Check again right before the network read, after the request was built.
+    ctx.check_cancelled()
     with urlopen(request) as response:
         if response.status != 200:
             raise Exception(
@@ -440,6 +462,9 @@ def _callService(
         json_dict = json.loads(body)
     variables = json_dict["head"]["vars"]
     for r in json_dict["results"]["bindings"]:
+        # Stop processing endpoint rows at a result boundary after a
+        # cancellation instead of turning them all into bindings.
+        ctx.check_cancelled()
         yield from _yieldBindingsFromServiceCallResult(ctx, r, variables)
 
 
@@ -740,8 +765,17 @@ def evalQuery(
     query: Query,
     initBindings: Mapping[str, Identifier] | None = None,
     base: str | None = None,
+    event: threading.Event | None = None,
 ) -> Mapping[Any, Any]:
     """Evaluate a SPARQL query against a graph.
+
+    Args:
+        event: A ``threading.Event`` another thread may set to request
+            cancellation. Evaluation stops at the next result boundary,
+            raising `~rdflib.query.QueryCancelledError`; a streamed SELECT
+            result reports ``ResultStatus.CANCELLED`` and keeps the rows it
+            already produced. The store iterator is closed so the cancelled
+            query stops reading from the store.
 
     !!! warning "Caution"
 
@@ -761,7 +795,10 @@ def evalQuery(
     initBindings = dict((Variable(k), v) for k, v in (initBindings or {}).items())
 
     ctx = QueryContext(
-        graph, initBindings=initBindings, datasetClause=main.datasetClause
+        graph,
+        initBindings=initBindings,
+        datasetClause=main.datasetClause,
+        event=event,
     )
 
     ctx.prologue = query.prologue
